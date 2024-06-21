@@ -1,30 +1,26 @@
 from typing import Annotated 
-from fastapi import Depends, status, HTTPException
+from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
-from sqlalchemy.orm import selectinload
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from generics.exceptions import UnAuthorizedException
 from config import settings
 from database import get_async_db
-from models import (
-    user as user_models,
-	division as division_models
-)
-import schemas
+from user.models import User
+
+from .models import Token
+from .schemas import TokenPayload, Login
 
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=settings.TOKEN_URL)
 
 
-
 def create_access_token(payload: dict):
 	data = payload.copy()
-	expires = datetime.utcnow() + timedelta(hours=settings.ACCESS_TOKEN_EXPIRE_HOURS)
-	data.update({'exp': expires})
 
 	token = jwt.encode(
 		data,
@@ -33,38 +29,90 @@ def create_access_token(payload: dict):
 	)
 	return token
 
-def verify_access_token(token: str, credentials_exceoption):
-	try:
-		payload = jwt.decode(
-			token,
-			settings.SECRET_KEY,
-			algorithms=[settings.TOKEN_ENCODING_ALGORITHM]
-		)
-		id: str = payload.get('user_id')
-		if not id:
-			raise credentials_exceoption
-	except JWTError:
-		raise credentials_exceoption
-	return schemas.authentication.TokenPayload(**payload)
 
-async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)], db: Annotated[AsyncSession, Depends(get_async_db)]):
-	credentials_exceoption = HTTPException(
-		status_code=status.HTTP_401_UNAUTHORIZED,
-		detail='could not validate credentials',
-		headers={'WWW-Authenticate': 'Bearer'}
-	)
-	token = verify_access_token(token, credentials_exceoption)
-	user = await db.execute(
-		select(user_models.User).
-		where(user_models.User.id==token.user_id).
-		options(
-			selectinload(user_models.User.divisions).
-			options(
-				selectinload(division_models.Division.regulation),
-				selectinload(division_models.Division.department_1),
-				selectinload(division_models.Division.department_2),
-			)
+class TokenHandler:
+
+
+	def __init__(self, db: AsyncSession = Depends(get_async_db)) -> None:
+		self.db = db
+		self.credentials_exception = UnAuthorizedException(detail="Invalid credentials")
+
+
+	async def create(self, user: User):
+		payload = {
+			'user_id': str(user.id),
+			'is_admin': user.is_admin
+		}
+		#expires = datetime.utcnow() + timedelta(hours=settings.ACCESS_TOKEN_EXPIRE_HOURS)
+		#payload.update({'exp': expires})
+
+		token = jwt.encode(
+			payload,
+			settings.SECRET_KEY,
+			algorithm=settings.TOKEN_ENCODING_ALGORITHM,
 		)
-	)
-	user = user.scalar_one()
+
+		token = Token(user_id=user.id, token=token)
+		self.db.add(token)
+		await self.db.commit()
+
+		return token
+
+
+	async def verify(self, token: str):
+		user_token = await self.db.get(Token, token)
+		if not (user_token and user_token.valid):
+			raise self.credentials_exception
+		try:
+			payload = jwt.decode(
+				token,
+				settings.SECRET_KEY,
+				algorithms=[settings.TOKEN_ENCODING_ALGORITHM]
+			)
+			id: str = payload.get('user_id')
+			if not id:
+				raise self.credentials_exception
+		except JWTError:
+			raise self.credentials_exception
+		return TokenPayload(**payload)
+	
+
+	async def validate(self, credentials: Login):
+		query = await self.db.execute(
+			select(User).
+			where(User.email == credentials.email)
+		)
+		user = query.scalar()
+		if not user or credentials.password != user.password:
+			raise self.credentials_exception
+		query = await self.db.execute(
+			select(Token).where(Token.user_id==user.id)
+		)
+		token = query.scalar()
+		if not token:
+			raise self.credentials_exception
+		token.valid = True
+		self.db.add(token)
+		await self.db.commit()
+		return {"token_type": "bearer", "accessToken": token.token}
+
+
+	async def invalidate(self, user: User):
+		query = await self.db.execute(
+			select(Token).where(Token.user_id==user.id)
+		)
+		token = query.scalar()
+		if not token:
+			raise self.credentials_exception
+		token.valid = False
+		self.db.add(token)
+		await self.db.commit()
+
+
+async def get_current_user(
+	token: Annotated[str, Depends(oauth2_scheme)], 
+	token_handler: Annotated[TokenHandler, Depends(TokenHandler)]
+):
+	token = await token_handler.verify(token)
+	user = await token_handler.db.get(User, token.user_id)
 	return user

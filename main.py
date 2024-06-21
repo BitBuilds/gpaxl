@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import routers
+
 
 origins = [
     'http://localhost',
@@ -10,6 +10,7 @@ origins = [
     'http://127.0.0.1:3000',
     'http://localhost:5500',
     'http://127.0.0.1:5500',
+	'https://tantacms.vercel.app',
 ]
 
 app = FastAPI(
@@ -25,11 +26,46 @@ app.add_middleware(
 	allow_headers=['*']
 )
 
-app.include_router(routers.authentication_router, prefix='/accounts', tags=['auth'])
-app.include_router(routers.regulation_router, prefix='/regulations', tags=['regulations'])
-app.include_router(routers.department_router, prefix='/departments', tags=['departments'])
-app.include_router(routers.division_router, prefix='/divisions', tags=['divisions'])
-app.include_router(routers.user_router, prefix='/accounts', tags=['users'])
-app.include_router(routers.course_router, prefix='/courses', tags=['courses'])
-app.include_router(routers.student_router, prefix='/students', tags=['students'])
-app.include_router(routers.upload_router, prefix='/data', tags=['uploads'])
+
+# from database.async_client import AsyncSessionLocal 
+# from user.handler import UserHandler
+# from user.schemas import UserCreate
+
+# @app.on_event('startup')
+# async def startup_event():
+# 	async with AsyncSessionLocal() as db:
+# 		handler = UserHandler(db)
+# 		try:
+# 			await handler.create(
+# 				UserCreate(
+# 					**{
+# 						'first_name': settings.ROOT_USER_FIRST_NAME,
+# 						'last_name': settings.ROOT_USER_LAST_NAME,
+# 						'email': settings.ROOT_USER_EMAIL,
+# 						'password': settings.ROOT_USER_PASSWORD,
+# 						'is_admin': True,
+# 						'divisions': []
+# 					}
+# 				)
+# 			)
+# 		except:
+# 			return {'detail': 'root user already exists'}		
+# 	return {'detail': 'root user created'}
+
+
+
+from config import settings
+from importlib import import_module
+
+
+for app_name in settings.APPS:
+	module_path = f"{app_name}.router"  # Adjust path as needed
+	module = import_module(module_path)
+	router = getattr(module, f"{app_name}_router", None)
+	if app_name in ['authentication', 'user']:
+		app.include_router(router, prefix='/accounts', tags=['authentication'])
+		continue
+	if app_name == 'upload':
+		app.include_router(router, prefix='/data', tags=['uploads'])
+		continue
+	app.include_router(router, prefix=f'/{app_name}s', tags=[f'{app_name}s'])
